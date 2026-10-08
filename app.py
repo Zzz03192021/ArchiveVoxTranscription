@@ -34,43 +34,48 @@ def process_queue():
     """Background worker to process transcription jobs"""
     while True:
         try:
-            job_id, audio_file, language = job_queue.get()
-            
+            job_id, temp_file_path, language = job_queue.get()
+
             with queue_lock:
                 jobs[job_id]['status'] = 'processing'
                 jobs[job_id]['queue_position'] = 0
-            
+
             try:
-                # Save to temp file
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as temp_file:
-                    audio_file.save(temp_file.name)
-                    
-                    # Transcribe
-                    result = model.transcribe(
-                        temp_file.name,
-                        language=language if language != 'auto' else None,
-                        fp16=False,
-                        verbose=False
-                    )
-                    
-                    # Cleanup
-                    os.unlink(temp_file.name)
-                    
-                    with queue_lock:
-                        jobs[job_id]['status'] = 'completed'
-                        jobs[job_id]['result'] = {
-                            "text": result["text"],
-                            "language": language if language != 'auto' else result.get("language", "unknown"),
-                            "detected_language": result.get("language", "unknown")
-                        }
-                        
+                # Transcribe from saved file
+                result = model.transcribe(
+                    temp_file_path,
+                    language=language if language != 'auto' else None,
+                    fp16=False,
+                    verbose=False
+                )
+
+                # Cleanup temp file
+                try:
+                    os.unlink(temp_file_path)
+                except:
+                    pass
+
+                with queue_lock:
+                    jobs[job_id]['status'] = 'completed'
+                    jobs[job_id]['result'] = {
+                        "text": result["text"],
+                        "language": language if language != 'auto' else result.get("language", "unknown"),
+                        "detected_language": result.get("language", "unknown")
+                    }
+
             except Exception as e:
+                # Cleanup temp file on error
+                try:
+                    os.unlink(temp_file_path)
+                except:
+                    pass
+
                 with queue_lock:
                     jobs[job_id]['status'] = 'failed'
                     jobs[job_id]['error'] = str(e)
-                    
+
             job_queue.task_done()
-            
+
         except Exception as e:
             print(f"Queue worker error: {e}")
             time.sleep(1)
@@ -89,32 +94,37 @@ def transcribe():
         # Get audio file
         if 'audio' not in request.files:
             return jsonify({"success": False, "error": "No audio file provided"}), 400
-        
+
         audio_file = request.files['audio']
         language = request.form.get('language', 'auto')
-        
+
+        # Save to temp file immediately
+        temp_file_path = tempfile.mktemp(suffix='.webm')
+        audio_file.save(temp_file_path)
+
         # Create job
         job_id = str(uuid.uuid4())
-        
+
         with queue_lock:
             jobs[job_id] = {
                 'status': 'queued',
                 'queue_position': job_queue.qsize(),
                 'result': None,
                 'error': None,
-                'created_at': time.time()
+                'created_at': time.time(),
+                'temp_file': temp_file_path
             }
-        
-        # Add to queue
-        job_queue.put((job_id, audio_file, language))
-        
+
+        # Add to queue with file path instead of file object
+        job_queue.put((job_id, temp_file_path, language))
+
         return jsonify({
             "success": True,
             "job_id": job_id,
             "status": "queued",
             "queue_position": jobs[job_id]['queue_position']
         })
-            
+
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
