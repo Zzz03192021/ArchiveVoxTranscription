@@ -36,24 +36,38 @@ def process_queue():
         try:
             job_id, temp_file_path, language = job_queue.get()
 
+            start_time = time.time()
+            queue_wait_time = start_time - jobs[job_id]['created_at']
+            print(f"[Job {job_id[:8]}] Queue wait time: {queue_wait_time:.2f}s")
+
             with queue_lock:
                 jobs[job_id]['status'] = 'processing'
                 jobs[job_id]['queue_position'] = 0
 
             try:
+                # Get audio file size for logging
+                file_size = os.path.getsize(temp_file_path)
+                print(f"[Job {job_id[:8]}] Audio file size: {file_size / 1024:.2f} KB")
+
                 # Transcribe from saved file
+                transcribe_start = time.time()
                 result = model.transcribe(
                     temp_file_path,
                     language=language if language != 'auto' else None,
-                    fp16=False,
+                    fp16=True,  # Enable half precision for faster inference
                     verbose=False
                 )
+                transcribe_time = time.time() - transcribe_start
+                print(f"[Job {job_id[:8]}] Transcription time: {transcribe_time:.2f}s")
 
                 # Cleanup temp file
                 try:
                     os.unlink(temp_file_path)
                 except:
                     pass
+
+                total_time = time.time() - start_time
+                print(f"[Job {job_id[:8]}] Total time: {total_time:.2f}s")
 
                 with queue_lock:
                     jobs[job_id]['status'] = 'completed'
@@ -64,6 +78,7 @@ def process_queue():
                     }
 
             except Exception as e:
+                print(f"[Job {job_id[:8]}] Transcription error: {e}")
                 # Cleanup temp file on error
                 try:
                     os.unlink(temp_file_path)
@@ -80,9 +95,12 @@ def process_queue():
             print(f"Queue worker error: {e}")
             time.sleep(1)
 
-# Start queue worker
-queue_thread = threading.Thread(target=process_queue, daemon=True)
-queue_thread.start()
+# Start multiple queue workers (2 workers for parallel processing)
+NUM_WORKERS = 2
+for i in range(NUM_WORKERS):
+    queue_thread = threading.Thread(target=process_queue, daemon=True)
+    queue_thread.start()
+    print(f"Started worker thread {i+1}/{NUM_WORKERS}")
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -114,6 +132,8 @@ def transcribe():
                 'created_at': time.time(),
                 'temp_file': temp_file_path
             }
+
+        print(f"[Job {job_id[:8]}] Job queued, position: {jobs[job_id]['queue_position']}")
 
         # Add to queue with file path instead of file object
         job_queue.put((job_id, temp_file_path, language))
