@@ -11,6 +11,11 @@ import time
 
 app = Flask(__name__)
 
+# Keep-alive to prevent Railway from killing the service
+@app.route('/keepalive', methods=['GET'])
+def keepalive():
+    return jsonify({"status": "alive", "time": time.time()})
+
 # Suppress stderr
 sys.stderr = io.StringIO()
 
@@ -109,6 +114,21 @@ for i in range(NUM_WORKERS):
     queue_thread.start()
     print(f"Started worker thread {i+1}/{NUM_WORKERS}")
 
+# Keep-alive thread to prevent Railway from killing the service
+def keepalive_thread_func():
+    while True:
+        try:
+            time.sleep(30)  # Ping every 30 seconds
+            # Just by running this loop, the thread keeps the process alive
+            print(f"[Keepalive] Service alive at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        except Exception as e:
+            print(f"[Keepalive] Error: {e}")
+            time.sleep(30)
+
+keepalive_thread = threading.Thread(target=keepalive_thread_func, daemon=False)
+keepalive_thread.start()
+print("Started keepalive thread")
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
@@ -188,4 +208,5 @@ def status(job_id):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
+    print(f"Starting Flask app on port {port}")
     app.run(host='0.0.0.0', port=port)
