@@ -32,9 +32,12 @@ queue_lock = threading.Lock()
 
 def process_queue():
     """Background worker to process transcription jobs"""
+    print("Worker thread started")
     while True:
         try:
+            print(f"Worker waiting for job... Queue size: {job_queue.qsize()}")
             job_id, temp_file_path, language = job_queue.get()
+            print(f"Worker received job {job_id[:8]}")
 
             start_time = time.time()
             queue_wait_time = start_time - jobs[job_id]['created_at']
@@ -79,6 +82,8 @@ def process_queue():
 
             except Exception as e:
                 print(f"[Job {job_id[:8]}] Transcription error: {e}")
+                import traceback
+                traceback.print_exc()
                 # Cleanup temp file on error
                 try:
                     os.unlink(temp_file_path)
@@ -93,18 +98,25 @@ def process_queue():
 
         except Exception as e:
             print(f"Queue worker error: {e}")
+            import traceback
+            traceback.print_exc()
             time.sleep(1)
 
 # Start multiple queue workers (2 workers for parallel processing)
 NUM_WORKERS = 2
 for i in range(NUM_WORKERS):
-    queue_thread = threading.Thread(target=process_queue, daemon=True)
+    queue_thread = threading.Thread(target=process_queue, daemon=False)  # daemon=False to prevent Railway from killing threads
     queue_thread.start()
     print(f"Started worker thread {i+1}/{NUM_WORKERS}")
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "healthy", "model": "tiny"})
+    return jsonify({
+        "status": "healthy",
+        "model": "tiny",
+        "queue_size": job_queue.qsize(),
+        "active_jobs": len(jobs)
+    })
 
 @app.route('/transcribe', methods=['POST'])
 def transcribe():
