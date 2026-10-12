@@ -8,13 +8,9 @@ import threading
 import queue
 import uuid
 import time
+import torch
 
 app = Flask(__name__)
-
-# Keep-alive to prevent Railway from killing the service
-@app.route('/keepalive', methods=['GET'])
-def keepalive():
-    return jsonify({"status": "alive", "time": time.time()})
 
 # Suppress stderr
 sys.stderr = io.StringIO()
@@ -25,10 +21,16 @@ os.makedirs(cache_dir, exist_ok=True)
 os.environ['HF_HOME'] = cache_dir
 os.environ['XDG_CACHE_HOME'] = cache_dir
 
+# Device detection
+print(f"PyTorch version: {torch.__version__}")
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"CPU count: {os.cpu_count()}")
+
 # Load model at startup
 print("Loading Whisper tiny model...")
 model = whisper.load_model("tiny")
-print("Model loaded successfully")
+print(f"Model loaded successfully on device: {model.device}")
+print(f"Whisper device: {model.device}")
 
 # Queue system
 job_queue = queue.Queue()
@@ -63,7 +65,7 @@ def process_queue(worker_id):
                 result = model.transcribe(
                     temp_file_path,
                     language=language if language != 'auto' else None,
-                    fp16=True,  # Enable half precision for faster inference
+                    fp16=False,  # Use full precision for CPU (fp16 is slower on CPU)
                     verbose=False
                 )
                 transcribe_time = time.time() - transcribe_start
@@ -111,10 +113,10 @@ def process_queue(worker_id):
             traceback.print_exc()
             time.sleep(1)
 
-# Start multiple queue workers (2 workers for parallel processing)
-NUM_WORKERS = 2
+# Start queue workers (1 worker for CPU-only environment to avoid resource contention)
+NUM_WORKERS = 1  # CPU-only: 1 worker to avoid vCPU contention
 for i in range(NUM_WORKERS):
-    queue_thread = threading.Thread(target=process_queue, args=(i,), daemon=False)  # daemon=False to prevent Railway from killing threads
+    queue_thread = threading.Thread(target=process_queue, args=(i,), daemon=False)
     queue_thread.start()
     worker_threads.append(queue_thread)
     print(f"Started worker thread {i+1}/{NUM_WORKERS}")
@@ -159,10 +161,12 @@ def health():
     return jsonify({
         "status": "healthy",
         "model": "tiny",
+        "device": str(model.device),
         "queue_size": job_queue.qsize(),
         "active_jobs": len(jobs),
         "active_workers": active_workers,
-        "total_workers": NUM_WORKERS
+        "total_workers": NUM_WORKERS,
+        "cuda_available": torch.cuda.is_available()
     })
 
 @app.route('/transcribe', methods=['POST'])
@@ -236,4 +240,4 @@ def status(job_id):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     print(f"Starting Flask app on port {port}")
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, threaded=True)
