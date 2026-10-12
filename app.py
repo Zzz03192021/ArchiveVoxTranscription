@@ -34,15 +34,16 @@ print("Model loaded successfully")
 job_queue = queue.Queue()
 jobs = {}  # job_id -> {status, result, error, queue_position}
 queue_lock = threading.Lock()
+worker_threads = []
 
-def process_queue():
+def process_queue(worker_id):
     """Background worker to process transcription jobs"""
-    print("Worker thread started")
+    print(f"Worker {worker_id} thread started")
     while True:
         try:
-            print(f"Worker waiting for job... Queue size: {job_queue.qsize()}")
-            job_id, temp_file_path, language = job_queue.get()
-            print(f"Worker received job {job_id[:8]}")
+            print(f"[Worker {worker_id}] Waiting for job... Queue size: {job_queue.qsize()}")
+            job_id, temp_file_path, language = job_queue.get(timeout=5)  # Add timeout to detect if thread is stuck
+            print(f"[Worker {worker_id}] Received job {job_id[:8]}")
 
             start_time = time.time()
             queue_wait_time = start_time - jobs[job_id]['created_at']
@@ -101,8 +102,11 @@ def process_queue():
 
             job_queue.task_done()
 
+        except queue.Empty:
+            # Timeout is expected if no jobs in queue
+            continue
         except Exception as e:
-            print(f"Queue worker error: {e}")
+            print(f"[Worker {worker_id}] Queue worker error: {e}")
             import traceback
             traceback.print_exc()
             time.sleep(1)
@@ -110,9 +114,29 @@ def process_queue():
 # Start multiple queue workers (2 workers for parallel processing)
 NUM_WORKERS = 2
 for i in range(NUM_WORKERS):
-    queue_thread = threading.Thread(target=process_queue, daemon=False)  # daemon=False to prevent Railway from killing threads
+    queue_thread = threading.Thread(target=process_queue, args=(i,), daemon=False)  # daemon=False to prevent Railway from killing threads
     queue_thread.start()
+    worker_threads.append(queue_thread)
     print(f"Started worker thread {i+1}/{NUM_WORKERS}")
+
+# Worker monitoring - restart crashed workers
+def monitor_workers():
+    while True:
+        time.sleep(10)
+        active_workers = sum(1 for t in worker_threads if t.is_alive())
+        print(f"[Monitor] Active workers: {active_workers}/{NUM_WORKERS}")
+        if active_workers < NUM_WORKERS:
+            print(f"[Monitor] Restarting workers...")
+            for i in range(NUM_WORKERS):
+                if not worker_threads[i].is_alive():
+                    print(f"[Monitor] Restarting worker {i+1}")
+                    new_thread = threading.Thread(target=process_queue, args=(i,), daemon=False)
+                    new_thread.start()
+                    worker_threads[i] = new_thread
+
+monitor_thread = threading.Thread(target=monitor_workers, daemon=False)
+monitor_thread.start()
+print("Started worker monitor thread")
 
 # Keep-alive thread to prevent Railway from killing the service
 def keepalive_thread_func():
@@ -131,11 +155,14 @@ print("Started keepalive thread")
 
 @app.route('/health', methods=['GET'])
 def health():
+    active_workers = sum(1 for t in worker_threads if t.is_alive())
     return jsonify({
         "status": "healthy",
         "model": "tiny",
         "queue_size": job_queue.qsize(),
-        "active_jobs": len(jobs)
+        "active_jobs": len(jobs),
+        "active_workers": active_workers,
+        "total_workers": NUM_WORKERS
     })
 
 @app.route('/transcribe', methods=['POST'])
